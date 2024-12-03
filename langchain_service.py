@@ -73,6 +73,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 savings_vectorstore = Chroma("savings_vectorstore", embedding_function=embedding)
 cards_vectorstore = Chroma("cards_vectorstore", embedding_function=embedding)
 funds_vectorstore = Chroma("funds_vectorstore", embedding_function=embedding)
+portfolio_vectorstore = Chroma("portfolio_vectorstore", embedding_function=embedding)
 
 def load_and_embed_csv(file_path, vectorstore):
     loader = CSVLoader(file_path=file_path)
@@ -84,11 +85,12 @@ def load_and_embed_csv(file_path, vectorstore):
 savings_csv_path = os.path.join(current_dir, "woori_bank_savings.csv")
 cards_csv_path = os.path.join(current_dir, "cards.csv")
 funds_csv_path = os.path.join(current_dir, "funds.csv")
-
+portfolio_csv_path = os.path.join(current_dir, "finance.csv")
 
 load_and_embed_csv(savings_csv_path, savings_vectorstore)
 load_and_embed_csv(cards_csv_path, cards_vectorstore)
 load_and_embed_csv(funds_csv_path, funds_vectorstore)
+load_and_embed_csv(portfolio_csv_path, portfolio_vectorstore)
 
 # 환율 API URL
 API_URL = f"https://api.exchangerate-api.com/v4/latest/USD?apikey={os.getenv('EXCHANGE_API_KEY')}"
@@ -112,6 +114,8 @@ class AssetInfo(BaseModel):
     savings: str
     fund: str
     debt: str  # 부채 추가
+    age: int
+    monthly_income: str
 
 class ResponseInfo(BaseModel):
     user_id: str
@@ -334,6 +338,7 @@ def set_asset_info(asset_info: AssetInfo):
     savings = clean_and_convert(asset_info.savings)
     fund = clean_and_convert(asset_info.fund)
     debt = clean_and_convert(asset_info.debt)
+    monthly_income = clean_and_convert(asset_info.monthly_income)
 
     # 총 자산 계산 (예금 + 적금 + 펀드 + 부채)
     total_assets = deposit + savings + fund + debt
@@ -343,8 +348,13 @@ def set_asset_info(asset_info: AssetInfo):
         "savings": str(savings) if savings != "정보 없음" else "정보 없음",
         "fund": str(fund) if fund != "정보 없음" else "정보 없음",
         "debt": str(debt) if debt != "정보 없음" else "정보 없음",
-        "totalAssets": str(total_assets) if total_assets != "정보 없음" else "정보 없음"  # 총 자산 추가
+        "totalAssets": str(total_assets) if total_assets != "정보 없음" else "정보 없음",  # 총 자산 추가
+        "monthly_income": str(monthly_income) if monthly_income != "정보 없음" else "정보 없음",
+        "age": asset_info.age
     }
+
+    print(f"Received age: {asset_info.age}")  # FastAPI에서 수신된 age 값 로그
+    print(f"Processed asset info: {user_asset_info}")  # 처리된 자산 정보 로그
 
     # 자산 정보를 챗봇에 학습시키기
     sendAssetInfoToChatbot(user_asset_info)
@@ -378,15 +388,21 @@ def recommend_products(request: UserRequest):
         # 사용자 자산 정보 포함
         if user_asset_info:
             asset_info_str = (
-                f"사용자의 자산 내역은 다음과 같습니다 - 예금: {user_asset_info['deposit']}원, "
-                f"적금: {user_asset_info['savings']}원, 펀드: {user_asset_info['fund']}원. "
-                f"부채: {user_asset_info['debt']}원, 총 자산: {user_asset_info['totalAssets']}원"
+                f"사용자의 자산 내역은 다음과 같습니다 - "
+                f"예금: {user_asset_info['deposit']}원, "
+                f"적금: {user_asset_info['savings']}원, "
+                f"펀드: {user_asset_info['fund']}원, "
+                f"부채: {user_asset_info['debt']}원, "
+                f"총 자산: {user_asset_info['totalAssets']}원, "
+                f"월 수입: {user_asset_info['monthly_income']}원, "
+                f"나이: {user_asset_info['age']}세."
             )
         else:
             asset_info_str = ""
 
+
         # 금융 관련 질문 확인
-        keywords = ["은행", "적금", "금리", "상품", "돈", "이자", "자산", "예금", "펀드", "투자"]
+        keywords = ["은행", "적금", "금리", "상품", "돈", "이자", "자산", "예금", "펀드", "투자", "저축", "포트폴리오", "주식", "달러", "환율", "저금", "수입", "소비"]
         is_financial_question = any(keyword in question.lower() for keyword in keywords)
 
         if is_financial_question:
@@ -394,15 +410,19 @@ def recommend_products(request: UserRequest):
             savings_results = savings_vectorstore.similarity_search(question, k=3)
             cards_results = cards_vectorstore.similarity_search(question, k=3)
             funds_results = funds_vectorstore.similarity_search(question, k=3)
+            portfolio_results = portfolio_vectorstore.similarity_search(question, k=3)
+
 
             # 검색 결과 정리
             savings_info = "\n".join([f"적금 추천: {doc.page_content}" for doc in savings_results])
             cards_info = "\n".join([f"카드 추천: {doc.page_content}" for doc in cards_results])
             funds_info = "\n".join([f"펀드 추천: {doc.page_content}" for doc in funds_results])
+            portfolio_info = "\n".join([f"자산 분배 원칙: {doc.page_content}" for doc in portfolio_results])
+
 
             # 금융 상품 정보 요약
             product_info_str = (
-                f"적금 정보:\n{savings_info}\n\n카드 정보:\n{cards_info}\n\n펀드 정보:\n{funds_info}"
+                f"적금 정보:\n{savings_info}\n\n카드 정보:\n{cards_info}\n\n펀드 정보:\n{funds_info}\n\n자산 분배 참고자료:\n{portfolio_info}"
             )
 
             # 1차 ChatCompletion 호출
@@ -415,8 +435,8 @@ def recommend_products(request: UserRequest):
                         "필요 시에 적절한 상품을 추천해줘. 필요하면 하나의 핵심 상품만 언급하고, 불필요한 정보는 포함하지 마."
                     )},
                     {"role": "user", "content": (
-                        f"사용자의 자산 내역은 다음과 같습니다: {asset_info_str}. "
-                        f"금융 상품 정보는 다음과 같습니다: {product_info_str}. "
+                        f"사용자의 자산 내역, 월수입, 나이는 다음과 같아: {asset_info_str}. "
+                        f"금융 상품 정보와 자산 분배 참고자료는 다음과 같아: {product_info_str}. "
                         f"질문: {question}?"
                     )}
                 ]
@@ -436,6 +456,7 @@ def recommend_products(request: UserRequest):
                         "만약 너가 필요한 정보가 있으면 사용자에게 질문해줘"
                     )},
                     {"role": "user", "content": (
+                        "`*` 기호나 불필요한 특수 문자가 있으면 삭제해줘."
                         f"사용자의 질문: {question}\n"
                         f"사용자의 자산 정보: {asset_info_str}\n"
                         f"처음 받은 응답: {first_response}\n"
