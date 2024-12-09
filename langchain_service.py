@@ -25,6 +25,8 @@ import numpy as np
 from apscheduler.schedulers.background import BackgroundScheduler
 
 
+
+
 DATABASE_URL = "mysql+pymysql://gunwoo2:woorifisa3!W@118.67.131.22:3306/gunwoo"
 Base = declarative_base()
 engine = create_engine(DATABASE_URL)
@@ -63,7 +65,7 @@ client = Open(api_key=api_key)
 
 embedding = OpenAIEmbeddings(api_key=api_key)
 # Load CSV data
-csv_path = os.getenv("CSV_PATH", "woori_bank_savings.csv")
+csv_path = os.getenv("CSV_PATH", "products2.csv")
 woori_bank_savings = pd.read_csv(csv_path).to_dict(orient='records')
 
 # Store user asset information and responses
@@ -82,9 +84,9 @@ def load_and_embed_csv(file_path, vectorstore):
     docs = text_splitter.split_documents(documents)
     vectorstore.add_documents(docs)
 
-savings_csv_path = os.path.join(current_dir, "woori_bank_savings.csv")
-cards_csv_path = os.path.join(current_dir, "cards.csv")
-funds_csv_path = os.path.join(current_dir, "funds.csv")
+savings_csv_path = os.path.join(current_dir, "products2.csv")
+cards_csv_path = os.path.join(current_dir, "cards2.csv")
+funds_csv_path = os.path.join(current_dir, "funds2.csv")
 portfolio_csv_path = os.path.join(current_dir, "finance.csv")
 
 load_and_embed_csv(savings_csv_path, savings_vectorstore)
@@ -270,7 +272,8 @@ def process_target_rate(user_rate: UserRateRequest, db: Session = Depends(get_db
         # 예금 차감 및 DB 반영
         user_asset_info["deposit"] -= transaction_amount_krw
         db.execute(
-            f"UPDATE user_profile SET deposit_holdings = {user_asset_info['deposit']} WHERE user_id = '{user_rate.user_id}'"
+            text("UPDATE user_profile SET deposit_holdings = :deposit WHERE user_id = :user_id"),
+            {"deposit": user_asset_info["deposit"], "user_id": user_rate.user_id}
         )
 
         # 외화 추가
@@ -306,11 +309,14 @@ def process_target_rate(user_rate: UserRateRequest, db: Session = Depends(get_db
 
         holding.balance -= user_rate.amount
 
-        # 예금 증가 (판매 금액을 기존 예금 잔액에 더하기)
+        # 입금 처리
         user_asset_info["deposit"] += transaction_amount_krw
         db.execute(
-            f"UPDATE user_profile SET deposit_holdings = {user_asset_info['deposit']} WHERE user_id = '{user_rate.user_id}'"
+            text("UPDATE user_profile SET deposit_holdings = :deposit WHERE user_id = :user_id"),
+            {"deposit": user_asset_info["deposit"], "user_id": user_rate.user_id}
         )
+
+        # 트랜잭션 커밋
         db.commit()
 
     return {"message": f"{user_rate.currency} 거래가 성공적으로 처리되었습니다."}
@@ -382,6 +388,10 @@ def recommend_products(request: UserRequest):
     """
     사용자의 질문에 대해 적절한 금융 상품을 추천합니다.
     """
+    def clean_response(text):
+        """줄바꿈과 특수 문자를 제거한 응답"""
+        return text.replace("\n", " ").replace("*", "").strip()
+
     try:
         question = request.question.strip()
 
@@ -402,7 +412,7 @@ def recommend_products(request: UserRequest):
 
 
         # 금융 관련 질문 확인
-        keywords = ["은행", "적금", "금리", "상품", "돈", "이자", "자산", "예금", "펀드", "투자", "저축", "포트폴리오", "주식", "달러", "환율", "저금", "수입", "소비"]
+        keywords = ["은행", "적금", "금리", "상품", "돈", "이자", "자산", "예금", "펀드", "투자", "저축", "포트폴리오", "주식", "달러", "환율", "저금", "수입", "소비", "카드", "부채"]
         is_financial_question = any(keyword in question.lower() for keyword in keywords)
 
         if is_financial_question:
@@ -432,12 +442,14 @@ def recommend_products(request: UserRequest):
                     {"role": "system", "content": (
                         "너는 간결하고 빠른 금융 상담 답변을 제공하는 에이전트야. "
                         "모든 답변은 200자 이내로 작성하며, 사용자의 자산 정보를 바탕으로 재무 상태를 분석하고 "
-                        "필요 시에 적절한 상품을 추천해줘. 필요하면 하나의 핵심 상품만 언급하고, 불필요한 정보는 포함하지 마."
+                        "필요 시에 적절한 상품을 추천해줘 추천해줄 때는 그 상품에 맞는 URL 반드시 포함해줘. 필요하면 하나의 핵심 상품만 언급하고, 불필요한 정보는 포함하지 마."
+                        "마크다운은 제거해줘"
                     )},
                     {"role": "user", "content": (
                         f"사용자의 자산 내역, 월수입, 나이는 다음과 같아: {asset_info_str}. "
                         f"금융 상품 정보와 자산 분배 참고자료는 다음과 같아: {product_info_str}. "
                         f"질문: {question}?"
+                        "마크다운은 제거해줘"
                     )}
                 ]
             )
@@ -454,13 +466,18 @@ def recommend_products(request: UserRequest):
                         "아래는 사용자가 처음 받은 응답이야. 이를 바탕으로 추가적인 인사이트를 제공하거나, "
                         "불필요한 내용을 제거하여 더욱 정확하고 간결한 최종 답변을 작성해줘."
                         "만약 너가 필요한 정보가 있으면 사용자에게 질문해줘"
+                        "상품을 추천해줄 떄는 그 상품에 맞는 URL을 반드시 포함해 줘."
+                        "마크다운은 제거해줘"
                     )},
                     {"role": "user", "content": (
                         "`*` 기호나 불필요한 특수 문자가 있으면 삭제해줘."
                         f"사용자의 질문: {question}\n"
                         f"사용자의 자산 정보: {asset_info_str}\n"
                         f"처음 받은 응답: {first_response}\n"
-                        "이 응답을 보완해서 최종적으로 더 나은 답변을 작성해줘."
+                        "추천을 제공하려면 반드시 사용자의 질문에서 '추천', '알려줘', '제안'과 같은 명시적인 요구가 있어야 해. "
+                        "사용자의 요청에 따라 적절한 상품을 추천할 때는 반드시 상품의 URL도 포함해서 답변을 작성해줘."
+                        "추천이 필요하지 않으면 재무 상태를 분석하고 필요한 조언만 제공해."
+                        "마크다운 등 불피요한 물자는 제거해줘"
                     )}
                 ]
             )
@@ -468,56 +485,65 @@ def recommend_products(request: UserRequest):
             # 2차 응답 추출
             final_response = response2.choices[0].message.content
 
-        else:
-            final_response = "죄송합니다. 은행 및 금융 관련 질문에만 답변을 제공할 수 있습니다."
+            # 줄바꿈 및 특수 문자 제거
+            cleaned_final_response = clean_response(final_response)
 
-        return {"response": final_response}
+        else:
+            cleaned_final_response = "죄송합니다. 은행 및 금융 관련 질문에만 답변을 제공할 수 있습니다."
+
+        return {"response": cleaned_final_response}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 
+
     
 @app.post("/analyze-user")
 def analyze_user(user: UserId):
-    # Database connection
+    # 데이터베이스 연결
     engine = create_engine('mysql+pymysql://gunwoo2:woorifisa3!W@118.67.131.22:3306/gunwoo')
     query = "SELECT * FROM user_profile"
     data = pd.read_sql(query, engine)
 
+    # 데이터 유효성 검사
     if data.empty:
         raise HTTPException(status_code=404, detail="No profile data found.")
     
-    # Preprocess data
-    data = data.drop(['password', 'cluster'], axis=1, errors='ignore')
+    # 불필요한 열 제거 및 결측값 처리
+    data = data.drop(['password'], axis=1, errors='ignore')
     data = data.replace('', np.nan).fillna(0)
 
-    categorical_features = ['gender', 'employment_status']
-    numerical_features = [col for col in data.columns if col not in categorical_features + ['user_id']]
+    # 클러스터링에 사용할 열만 선택 (debt_amount, net_worth)
+    clustering_data = data[['debt_amount', 'net_worth']]
 
-    preprocessor = ColumnTransformer([
-        ('num', StandardScaler(), numerical_features),
-        ('cat', OneHotEncoder(drop='first'), categorical_features)
-    ])
-    pipeline = Pipeline(steps=[('preprocessor', preprocessor)])
-    data_processed = pipeline.fit_transform(data)
+    # 데이터 정규화
+    scaler = StandardScaler()
+    scaled_data = scaler.fit_transform(clustering_data)
 
-    n_clusters = min(4, len(data_processed))
-    kmeans = KMeans(n_clusters=n_clusters, random_state=42)
-    clusters = kmeans.fit_predict(data_processed)
+    # KMeans 클러스터링
+    n_clusters = min(4, len(scaled_data))  # 최대 클러스터 수 4
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10, max_iter=300)
+    clusters = kmeans.fit_predict(scaled_data)
     data['cluster'] = clusters
 
+    # 요청된 사용자 ID 기반 데이터 추출
     user_data = data[data['user_id'] == user.user_Id]
-    user_processed = pipeline.transform(user_data.drop(['user_id'], axis=1))
-    user_cluster = kmeans.predict(user_processed)[0]
+    if user_data.empty:
+        raise HTTPException(status_code=404, detail=f"User ID {user.user_id} not found.")
+    
+    user_cluster = user_data['cluster'].values[0]
 
-    # 클러스터별 평균 순자산 및 부채 계산
+    # 클러스터 평균 계산
     cluster_data = data[data['cluster'] == user_cluster]
     avg_net_assets = cluster_data['total_financial_assets'].mean() - cluster_data['debt_amount'].mean()
     avg_debt = cluster_data['debt_amount'].mean()
+
+    # 사용자 자산 및 부채 계산
     user_net_assets = user_data['total_financial_assets'].values[0] - user_data['debt_amount'].values[0]
     user_debt = user_data['debt_amount'].values[0]
 
+    # 결과 반환
     return {
         "userType": f"Cluster {user_cluster}",
         "userNetAssets": user_net_assets,
@@ -525,6 +551,7 @@ def analyze_user(user: UserId):
         "avgNetAssets": avg_net_assets,
         "avgDebt": avg_debt
     }
+
 
 from decimal import Decimal
 
@@ -606,21 +633,6 @@ def check_target_rate(user_rate: UserRateRequest):
 
 
 
-def notify_user(user_rate: UserRateRequest, current_rate: float):
-    """
-    거래 완료 시 알림 생성 및 전송.
-    """
-    try:
-        notification = {
-            "userId": user_rate.user_id,
-            "message": f"거래 완료: {user_rate.amount} {user_rate.currency} 거래가 체결되었습니다! "
-                       
-        }
-        response = requests.post("http://localhost:8001/notifications/create", json=notification)
-        response.raise_for_status()  # 요청 실패 시 예외 발생
-    except requests.exceptions.RequestException as e:
-        print(f"[ERROR] 알림 전송 실패: {e}")
-
 
 
 # APScheduler 설정
@@ -636,6 +648,55 @@ def monitor_exchange_rates():
 scheduler.add_job(monitor_exchange_rates, "interval", hours=24)  # 24시간마다 실행
 scheduler.start()
 
-@app.on_event("shutdown")
-def shutdown_event():
-    scheduler.shutdown()
+
+
+class FeedbackRequest(BaseModel):
+    user_id: str
+    rating: int
+    feedback_comment: str
+
+
+from sqlalchemy import Column, Integer, String, Text, ForeignKey
+from sqlalchemy.orm import relationship
+
+# UserProfile 클래스 먼저 정의
+class UserProfile(Base):
+    __tablename__ = 'user_profile'
+
+    user_id = Column(String(50), primary_key=True)
+    # 나머지 필드들 정의
+    feedbacks = relationship("Feedback", back_populates="user")
+
+# Feedback 클래스 정의
+class Feedback(Base):
+    __tablename__ = 'chatbot_feedback'
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String(50), ForeignKey("user_profile.user_id"))  # 외래키 설정
+    question = Column(Text, nullable=False, default='No Question Provided')  # 기본값 설정
+    answer = Column(Text, nullable=False, default='No answer Provided')
+    rating = Column(Integer, nullable=False)
+    feedback_comment = Column(Text, nullable=True)
+
+    user = relationship("UserProfile", back_populates="feedbacks")  # 관계 설정
+
+
+    user = relationship("UserProfile", back_populates="feedbacks")
+
+    @app.post("/submit-feedback")
+    def submit_feedback(feedback: FeedbackRequest, db: Session = Depends(get_db)):
+        """
+        사용자가 챗봇에 대한 피드백을 제출합니다.
+        """
+        # 사용자 피드백 정보 DB에 저장
+        new_feedback = Feedback(
+            user_id=feedback.user_id,
+            rating=feedback.rating,
+            feedback_comment=feedback.feedback_comment
+        )
+        
+        db.add(new_feedback)
+        db.commit()
+        db.refresh(new_feedback)
+
+        return {"message": "피드백이 성공적으로 제출되었습니다."}
